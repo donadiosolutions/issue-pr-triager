@@ -1,0 +1,18 @@
+{
+  "name": "Donadio Solutions Triager",
+  "url": "https://github.com/donadiosolutions/issue-pr-triager",
+  "description": "Classifies issues and pull requests and adds them to configured organization projects.",
+  "public": false,
+  "hook_attributes": {
+    "active": false
+  },
+  "default_permissions": {
+    "contents": "read",
+    "issues": "write",
+    "pull_requests": "write",
+    "organization_projects": "write",
+    "issue_fields": "read",
+    "issue_types": "read"
+  },
+  "default_events": []
+}

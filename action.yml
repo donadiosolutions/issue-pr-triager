@@ -1,0 +1,51 @@
+name: Issue and PR triager
+description: Classify issues and pull requests using live GitHub catalogs and OpenAI.
+author: Donadio Solutions
+branding:
+  icon: inbox
+  color: gray-dark
+inputs:
+  github-token:
+    description: Short-lived GitHub App token with Issues, Pull requests, and organization Projects write access.
+    required: true
+  openai-api-token:
+    description: OpenAI API token; supply secrets.TRIAGER_TOKEN from the caller.
+    required: false
+  project-number:
+    description: Destination organization project number.
+    required: true
+  mode:
+    description: enroll, process, or backfill. Backfill must be started manually.
+    default: process
+  item-number:
+    description: Optional issue or pull request number; otherwise use the event or enrolled queue.
+  dry-run:
+    description: Evaluate and report intended operations without GitHub writes.
+    default: 'false'
+  reclassify:
+    description: Refresh bot-owned values without replacing human overrides.
+    default: 'false'
+  checkpoint-path:
+    description: Local checkpoint file restored and uploaded by the caller.
+  priority-field-name:
+    description: Organization issue field used for priority.
+    default: Priority
+  effort-field-name:
+    description: Organization issue field used for effort.
+    default: Effort
+outputs:
+  processed:
+    description: Number of items completed.
+  deferred:
+    description: Number of items with pending work.
+  failed:
+    description: Number of items with API or processing failures.
+  human-review:
+    description: Number of items needing human input.
+  backfill-remaining:
+    description: Whether manually authorized backfill discovery remains.
+  checkpoint-path:
+    description: Local checkpoint file to upload, when present.
+runs:
+  using: node24
+  main: src/index.js
