@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { main } from '../src/index.js';
 
-const node = '/home/bcdonadio/.nvm/versions/node/v24.22.3/bin/node';
+const node = process.execPath;
 
 function runCli(args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -48,7 +48,7 @@ test('main redacts credentials and records failure exit code', async () => {
 });
 
 test('real entrypoint fails safely on invalid invocation', async () => {
-  const result = await runCli(['src/index.js'], { cwd: process.cwd(), env: { ...process.env, GITHUB_REPOSITORY: 'org/repo', 'INPUT_GITHUB-TOKEN': 'cli-secret' } });
+  const result = await runCli(['src/index.js'], { cwd: process.cwd(), env: { ...process.env, GITHUB_EVENT_PATH: '', GITHUB_REPOSITORY: 'org/repo', 'INPUT_GITHUB-TOKEN': 'cli-secret' } });
   assert.equal(result.code, 1);
   assert.match(result.stderr, /GITHUB_EVENT_PATH is required/);
   assert.doesNotMatch(result.stderr, /cli-secret/);
