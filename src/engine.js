@@ -73,7 +73,7 @@ export async function runEngine(config, {github,classify,now=Date.now,checkpoint
         state.pending=null;
       }
       const hash=fingerprint(item,catalog,state.ownership,bot,state.removedLabels);
-      if (hash!==state.fingerprint) Object.assign(state,{fingerprint:hash,pass:0,phase:'pending',decision:null,unresolved:[]});
+      if (hash!==state.fingerprint||(manual&&config.reclassify)) Object.assign(state,{fingerprint:hash,pass:0,phase:'pending',decision:null,unresolved:[]});
       else if (state.phase==='review') {result.humanReview++;return;}
       else if (state.phase==='complete'&&!config.reclassify) {
         if(!config.dryRun&&item.labels.includes('triage'))await phase('queue',()=>github.setTriage(number,false));
