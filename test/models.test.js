@@ -400,13 +400,19 @@ function structuredResponse(payload) {
   return { model: 'gpt-6.1-terra', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(payload) }] }], usage };
 }
 
-test('issues with no remaining classification tasks complete without provider requests',async()=>{
-  for(const stage of [1,2]) {
+test('issues and PRs with no remaining classification tasks complete without provider requests',async()=>{
+  for(const kind of ['issue','pr']) for(const stage of [1,2]) {
     const calls=[];
     const classify=classifier({},calls);
-    const result=await classify({item:{...item,kind:'issue'},catalog:{...catalog,labels:[{name:'triage'}]},candidates:[],stage,fieldNames:[]});
+    const result=await classify({item:{...item,kind},catalog:{...catalog,labels:[{name:'triage'}]},candidates:[],stage,fieldNames:[]});
     assert.deepEqual(calls,[]);
     assert.deepEqual(result,{labels:[],type:null,priority:null,effort:null,parent:{number:null,confidence:0,margin:0,fullyResolves:false,status:'none'},unresolved:[],usage:[]});
+  }
+});
+test('PRs with incomplete or candidate parent evidence retain parent review when other tasks are done',async()=>{
+  for(const stage of [1,2]) for(const truncated of [false,true]) {
+    const result=await classifier({answers:[]})({item:{...item,kind:'pr',truncated},catalog:{...catalog,labels:[]},candidates:truncated?[]:candidates,stage,fieldNames:[]});
+    assert.equal(result.parent.status,'uncertain');assert.ok(result.unresolved.length>0);
   }
 });
 

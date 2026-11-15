@@ -318,8 +318,9 @@ function createClassifier({ token, fetch = globalThis.fetch, sleep, now, request
     const activeFields = new Set((Array.isArray(fieldNames) ? fieldNames : []).filter(name => ['type', 'priority', 'effort'].includes(name)));
     requestDeadline = deadline;
     const evidence = evidenceText(item, candidates);
-    if (!taskCodes(catalog,item.kind,activeFields).length) {
-      const result=fallbackDecision(undefined,item.kind);
+    const noParent=item.kind!=='pr'||(!candidates.length&&!evidence.truncated);
+    if (!businessLabels(catalog).length&&!activeFields.size&&noParent) {
+      const result=fallbackDecision(undefined,'issue');
       result.unresolved=[];
       return result;
     }

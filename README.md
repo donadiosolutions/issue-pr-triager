@@ -92,7 +92,7 @@ The Action sends bounded issue/PR text, relevant discussion, candidate issues, a
 
 A PR link requires a unique same-repository candidate, confidence of at least 0.95, a margin of at least 0.15, and evidence that the PR fully resolves the issue. Existing associations are preserved. For a qualifying PR targeting the default branch, the Action appends one marked `Closes #N` block. This closes the issue when merged. Partial, ambiguous, and non-default-branch matches remain for review; no-parent is a valid outcome.
 
-`triage` remains while work is pending and is removed after completion. Populated fields being preserved do not require another model choice. Existing review states whose only blockers are preserved fields complete without another paid request. One bot-owned progress comment records enrollment, fingerprints, ownership, and unresolved reasons. After two unchanged semantic passes, the Action stops making paid calls and retains the label for human review. Transport retries are bounded; saved valid decisions can resume partially completed writes.
+`triage` remains while work is pending and is removed after completion. Populated fields, applied labels, and human-removed bot labels do not require another model choice. Existing review states whose only blockers are satisfied tasks complete without another paid request. Existing PR associations satisfy parent review tasks. One bot-owned progress comment records enrollment, fingerprints, ownership, and unresolved reasons. After two unchanged semantic passes, the Action stops making paid calls and retains the label for human review. Transport retries are bounded; saved valid decisions can resume partially completed writes.
 
 ## Development and coverage
 
