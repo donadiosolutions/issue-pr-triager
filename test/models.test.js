@@ -18,7 +18,7 @@ const catalog = {
   },
 };
 const item = {
-  number: 17, kind: 'issue', title: 'Crash on save', body: 'Saving a draft exits unexpectedly.',
+  number: 17, kind: 'pr', title: 'Crash on save', body: 'Saving a draft exits unexpectedly.',
   state: 'open', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z',
   labels: [], type: null, priority: null, effort: null,
   comments: [{ id: 1, body: 'Only happens for large drafts.', author: 'reporter' }],
@@ -219,12 +219,12 @@ test('stage 1 handles missing fields, confidence boundaries, and ambiguous paren
 
 test('stage 1 treats candidate exhaustion and malformed parent data conservatively', async () => {
   const classify = classifier({ model: 'gpt-6-luna', answers: [{ type: 'choice', name: 'parent', choice: '999', confidence: 0.99, probabilities: [] }] });
-  const noDetails = await classify({ item: {}, catalog: {}, candidates: [{ number: 1 }], stage: 1 });
+  const noDetails = await classify({ item: { kind: 'pr' }, catalog: {}, candidates: [{ number: 1 }], stage: 1 });
   assert.equal(noDetails.parent.status, 'uncertain');
   assert.equal(noDetails.parent.confidence, 0.99);
   const emptyCatalog = await classifier({ answers: [] })({ item: {}, catalog: {}, candidates: [], stage: 1 });
   assert.equal(emptyCatalog.parent.status, 'none');
-  const truncated = await classifier({ answers: [] })({ item: { truncated: true }, catalog: {}, candidates: null, stage: 1 });
+  const truncated = await classifier({ answers: [] })({ item: { kind: 'pr', truncated: true }, catalog: {}, candidates: null, stage: 1 });
   assert.equal(truncated.parent.status, 'uncertain');
 });
 
@@ -249,7 +249,7 @@ test('stage 1 bounds excess comments, patches, and oversized candidate evidence'
   let sent;
   const classify = createClassifier({ token: 't', request: async (_method, _path, body) => { sent = body.input.at(-1).content; return { answers: [], model: 'gpt-6-luna' }; } });
   const manyCandidates = Array.from({ length: 31 }, (_, index) => ({ number: index + 1, title: 't'.repeat(300), body: 'b'.repeat(900), state: 'open' }));
-  const oversized = { comments: Array.from({ length: 6 }, () => ({ body: 'c'.repeat(700) })), files: Array.from({ length: 7 }, () => ({ filename: 'f', patch: 'p'.repeat(800) })) };
+  const oversized = { kind: 'pr', comments: Array.from({ length: 6 }, () => ({ body: 'c'.repeat(700) })), files: Array.from({ length: 7 }, () => ({ filename: 'f', patch: 'p'.repeat(800) })) };
   const result = await classify({ item: oversized, catalog: {}, candidates: manyCandidates, stage: 1 });
   assert.equal(result.parent.status, 'uncertain');
   assert.ok(sent.length <= 12_000);
@@ -266,7 +266,7 @@ test('stage 2 defers malformed JSON and invalid or missing values', async () => 
   assert.equal(result.priority, null);
   assert.equal(result.effort, 'Small');
   assert.equal(result.parent.status, 'none');
-  assert.ok(result.unresolved.includes('manual'));
+  assert.ok(result.unresolved.includes('provider_response'));
 });
 
 test('stage 2 handles non-object output, malformed content, and truncated no-candidate context', async () => {
@@ -274,7 +274,7 @@ test('stage 2 handles non-object output, malformed content, and truncated no-can
   const result = await classifier(response)({ item, catalog: {}, candidates: [], stage: 2 });
   assert.ok(result.unresolved.includes('provider_response'));
   const truncatedResponse = { status: 'completed', output: [{ content: [{ type: 'output_text', text: JSON.stringify({ labels: [], type: {}, priority: {}, effort: {}, parent: {}, unresolved: 'bad' }) }] }] };
-  const truncated = await classifier(truncatedResponse)({ item: { truncated: true }, catalog: {}, candidates: [], stage: 2 });
+  const truncated = await classifier(truncatedResponse)({ item: { kind: 'pr', truncated: true }, catalog: {}, candidates: [], stage: 2 });
   assert.equal(truncated.parent.status, 'uncertain');
 });
 
@@ -391,7 +391,88 @@ test('provider review strings cannot inject comment markup or mention other user
   const payload={labels:[],type:{},priority:{},effort:{},parent:{number:0,confidence:1,margin:1,fully_resolves:false,rationale:'No match'},unresolved:['--> @someone ![track](https://example.invalid)','plain uncertainty']};
   const response={status:'completed',output:[{content:[{type:'output_text',text:JSON.stringify(payload)}]}]};
   const result=await classifier(response)({item,catalog,candidates:[],stage:2});
-  assert.ok(result.unresolved.includes('model requested human review'));
-  assert.ok(result.unresolved.includes('plain uncertainty'));
+  assert.deepEqual(result.unresolved, ['provider_response', 'type', 'priority', 'effort']);
   assert.ok(!JSON.stringify(result).includes('@someone'));
+});
+
+
+function structuredResponse(payload) {
+  return { model: 'gpt-6.1-terra', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(payload) }] }], usage };
+}
+
+function issuePayload(unresolved = []) {
+  return {
+    labels: [{ name: 'bug', confidence: 0.98, rationale: 'Reproducible crash on saving a draft.' }],
+    type: { value: 'Defect', confidence: 0.98, rationale: 'Existing functionality fails.' },
+    priority: { value: 'P1', confidence: 0.95, rationale: 'Saving drafts blocks work.' },
+    effort: { value: 'Small', confidence: 0.93, rationale: 'One narrow implementation change.' },
+    unresolved,
+  };
+}
+
+test('ordinary issue requests classify four dimensions without PR parent tasks in either stage', async () => {
+  const issue = { ...item, kind: 'issue', truncated: true };
+  for (const stage of [1, 2]) {
+    const calls = [];
+    const response = stage === 1 ? { answers: goodDecisionAnswers() } : structuredResponse(issuePayload());
+    const result = await classifier(response, calls)({ item: issue, catalog, candidates, stage });
+    const body = calls[0][2];
+    assert.doesNotMatch(JSON.stringify(body.input), /parent|pull request/i);
+    assert.deepEqual(JSON.parse(body.input.at(-1).content).candidates, []);
+    if (stage === 1) {
+      assert.deepEqual(body.questions.map(q => q.name), ['label:bug', 'label:needs-design', 'type', 'priority', 'effort']);
+    } else {
+      const schema = body.text.format.schema;
+      assert.deepEqual(schema.required, ['labels', 'type', 'priority', 'effort', 'unresolved']);
+      assert.equal(schema.properties.parent, undefined);
+      assert.deepEqual(schema.properties.unresolved.items.enum, ['label:bug', 'label:needs-design', 'type', 'priority', 'effort']);
+    }
+    assert.deepEqual(result.parent, { number: null, confidence: 0, margin: 0, fullyResolves: false, status: 'none' });
+    assert.deepEqual(result.labels, ['bug']);
+    assert.equal(result.type, 'Defect');
+    assert.equal(result.priority, 'P1');
+    assert.equal(result.effort, 'Small');
+    assert.deepEqual(result.unresolved, []);
+  }
+});
+
+test('PR unresolved schema allows only live task codes including parent', async () => {
+  const calls = [];
+  await classifier(structuredResponse(issuePayload()), calls)({ item, catalog: { ...catalog, labels: [...catalog.labels, { name: 'triage' }, { name: 'Customer Scope' }] }, candidates, stage: 2 });
+  const body = calls[0][2];
+  assert.deepEqual(body.text.format.schema.properties.unresolved.items.enum, ['label:bug', 'label:needs-design', 'label:Customer Scope', 'type', 'priority', 'effort', 'parent']);
+  assert.ok(body.text.format.schema.required.includes('parent'));
+  assert.match(body.input[0].content, /pull request fully resolves the candidate issue/);
+});
+
+test('stage 2 retains known uncertainty and converts unknown or wrong-scope codes to fixed review reason', async () => {
+  for (const kind of ['issue', 'pr']) {
+    for (const unresolved of [
+      ['type', 'label:needs-design', 'label:needs-design'],
+      ['type', 'parent'],
+      ['label:bug', 'Parent issue cannot be determined from supplied evidence.'],
+      ['priority', 'label:triage'], ['effort', 'label:invented'], ['type', 1],
+      'bad', undefined, Array(21).fill('type'),
+    ]) {
+      const payload = issuePayload(unresolved);
+      if (unresolved === undefined) delete payload.unresolved;
+      const result = await classifier(structuredResponse(payload))({ item: { ...item, kind }, catalog, candidates: [], stage: 2 });
+      const valid = ['label:bug', 'label:needs-design', 'type', 'priority', 'effort', ...(kind === 'pr' ? ['parent'] : [])];
+      assert.ok(result.unresolved.length > 0);
+      assert.ok(result.unresolved.every(code => valid.includes(code) || code === 'provider_response'));
+      if (Array.isArray(unresolved) && unresolved.length <= 20) {
+        for (const code of unresolved.filter(code => valid.includes(code))) assert.ok(result.unresolved.includes(code));
+        if (unresolved.some(code => !valid.includes(code))) assert.ok(result.unresolved.includes('provider_response'));
+      } else assert.ok(result.unresolved.includes('provider_response'));
+    }
+  }
+});
+
+test('ordinary issue fallback and empty catalog never produce a parent task', async () => {
+  for (const [stage, response, live] of [[1, {}, catalog], [2, { status: 'incomplete' }, catalog], [2, structuredResponse(null), catalog], [1, { answers: [] }, {}]]) {
+    const result = await classifier(response)({ item: { ...item, kind: 'issue', truncated: true }, catalog: live, candidates, stage });
+    assert.equal(result.parent.status, 'none');
+    assert.ok(!result.unresolved.includes('parent'));
+    assert.ok(result.unresolved.includes('provider_response'));
+  }
 });
