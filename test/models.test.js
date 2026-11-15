@@ -400,6 +400,16 @@ function structuredResponse(payload) {
   return { model: 'gpt-6.1-terra', status: 'completed', output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify(payload) }] }], usage };
 }
 
+test('issues with no remaining classification tasks complete without provider requests',async()=>{
+  for(const stage of [1,2]) {
+    const calls=[];
+    const classify=classifier({},calls);
+    const result=await classify({item:{...item,kind:'issue'},catalog:{...catalog,labels:[{name:'triage'}]},candidates:[],stage,fieldNames:[]});
+    assert.deepEqual(calls,[]);
+    assert.deepEqual(result,{labels:[],type:null,priority:null,effort:null,parent:{number:null,confidence:0,margin:0,fullyResolves:false,status:'none'},unresolved:[],usage:[]});
+  }
+});
+
 function issuePayload(unresolved = []) {
   return {
     labels: [{ name: 'bug', confidence: 0.98, rationale: 'Reproducible crash on saving a draft.' }],
@@ -434,6 +444,71 @@ test('ordinary issue requests classify four dimensions without PR parent tasks i
     assert.equal(result.effort, 'Small');
     assert.deepEqual(result.unresolved, []);
   }
+});
+
+test('partial issue and PR classifications request and validate only active fields in both stages', async () => {
+  for (const [kind, fieldName, value] of [['issue', 'type', 'Defect'], ['pr', 'effort', 'Small']]) {
+    const activeFields = [fieldName];
+    for (const stage of [1, 2]) {
+      const calls = [];
+      let response;
+      if (stage === 1) {
+        const answers = goodDecisionAnswers().filter(answer => !['type', 'priority', 'effort'].includes(answer.name) || answer.name === fieldName);
+        response = { answers };
+      } else {
+        const payload = { labels: [{ name: 'bug', confidence: 0.98, rationale: 'Reproducible crash.' }], unresolved: [] };
+        payload[fieldName] = { value, confidence: 0.98, rationale: 'Evidence supports this catalog value.' };
+        if (kind === 'pr') payload.parent = { number: 8, confidence: 0.98, margin: 0.9, fully_resolves: true, rationale: 'The changes resolve the issue.' };
+        response = structuredResponse(payload);
+      }
+      const result = await classifier(response, calls)({ item: { ...item, kind }, catalog, candidates, stage, fieldNames: activeFields });
+      const body = calls[0][2];
+      if (stage === 1) {
+        assert.deepEqual(body.questions.filter(q => ['type', 'priority', 'effort'].includes(q.name)).map(q => q.name), [fieldName]);
+      } else {
+        const schema = body.text.format.schema;
+        assert.deepEqual(['type', 'priority', 'effort'].filter(name => schema.properties[name]), [fieldName]);
+        assert.deepEqual(schema.required.filter(name => ['type', 'priority', 'effort'].includes(name)), [fieldName]);
+        assert.ok(!schema.properties.unresolved.items.enum.includes('type') || fieldName === 'type');
+        assert.ok(!schema.properties.unresolved.items.enum.includes('priority') || fieldName === 'priority');
+        assert.ok(!schema.properties.unresolved.items.enum.includes('effort') || fieldName === 'effort');
+      }
+      assert.equal(result[fieldName], value);
+      for (const name of ['type', 'priority', 'effort'].filter(name => name !== fieldName)) assert.equal(result[name], null);
+      assert.deepEqual(result.unresolved, []);
+    }
+  }
+});
+
+test('missing or low-confidence active fields remain unresolved while omitted inactive fields do not', async () => {
+  const stage1 = goodDecisionAnswers().filter(answer => !['type', 'priority', 'effort'].includes(answer.name) || answer.name === 'priority');
+  stage1.find(answer => answer.name === 'priority').confidence = 0.84;
+  const first = await classifier({ answers: stage1 })({ item, catalog, candidates, stage: 1, fieldNames: ['priority'] });
+  assert.equal(first.type, null);
+  assert.equal(first.effort, null);
+  assert.equal(first.priority, null);
+  assert.ok(first.unresolved.includes('priority'));
+  assert.ok(!first.unresolved.includes('type'));
+  assert.ok(!first.unresolved.includes('effort'));
+
+  const payload = { labels: [{ name: 'bug', confidence: 0.98, rationale: 'Reproducible crash.' }], unresolved: [] };
+  const second = await classifier(structuredResponse(payload))({ item: { ...item, kind: 'issue' }, catalog, candidates: [], stage: 2, fieldNames: ['priority'] });
+  assert.equal(second.type, null);
+  assert.equal(second.effort, null);
+  assert.equal(second.priority, null);
+  assert.ok(second.unresolved.includes('priority'));
+  assert.ok(!second.unresolved.includes('type'));
+  assert.ok(!second.unresolved.includes('effort'));
+});
+
+test('non-array field selection safely disables scalar field tasks', async () => {
+  const calls = [];
+  const result = await classifier({ answers: goodDecisionAnswers() }, calls)({ item: { ...item, kind: 'issue' }, catalog, candidates: [], stage: 1, fieldNames: null });
+  assert.deepEqual(calls[0][2].questions.filter(question => ['type', 'priority', 'effort'].includes(question.name)), []);
+  assert.equal(result.type, null);
+  assert.equal(result.priority, null);
+  assert.equal(result.effort, null);
+  assert.deepEqual(result.unresolved, []);
 });
 
 test('PR unresolved schema allows only live task codes including parent', async () => {

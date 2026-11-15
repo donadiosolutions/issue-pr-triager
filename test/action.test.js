@@ -47,6 +47,7 @@ test('reads hyphenated GitHub inputs and invokes engine with parsed context', as
     assert.equal(config.itemNumber, 42);
     assert.equal(config.dryRun, true);
     assert.equal(config.reclassify, false);
+    assert.equal(config.concurrency, 4);
     assert.deepEqual(config.event, { issue: { number: 42 } });
     assert.equal(runtime.github.config.token, 'gh-secret');
     assert.equal(context.calls.logs.filter((line) => line.startsWith('::add-mask::')).length, 2);
@@ -58,6 +59,10 @@ test('requires credentials according to mode and validates strict inputs', async
   const invalids = [
     [{ 'PROJECT-NUMBER': '0' }, 'project-number'],
     [{ 'ITEM-NUMBER': '-1' }, 'item-number'],
+    [{ CONCURRENCY: '0' }, 'concurrency'],
+    [{ CONCURRENCY: '21' }, 'concurrency'],
+    [{ CONCURRENCY: '1.5' }, 'concurrency'],
+    [{ CONCURRENCY: 'unbounded' }, 'concurrency'],
     [{ MODE: 'unknown' }, 'mode'],
     [{ 'DRY-RUN': 'yes' }, 'dry-run'],
     [{ 'RECLASSIFY': 'TRUE' }, 'reclassify'],
@@ -68,6 +73,16 @@ test('requires credentials according to mode and validates strict inputs', async
     const context = await setup({ inputs });
     try { await assert.rejects(runAction(context.env, context.dependencies), new RegExp(field)); }
     finally { await rm(context.directory, { recursive: true, force: true }); }
+  }
+});
+
+test('passes explicitly configured item concurrency to the engine', async () => {
+  for (const concurrency of ['1', '2', '20']) {
+    const context = await setup({ inputs: { CONCURRENCY: concurrency } });
+    try {
+      await runAction(context.env, context.dependencies);
+      assert.equal(context.calls.engines[0].config.concurrency, Number(concurrency));
+    } finally { await rm(context.directory, { recursive: true, force: true }); }
   }
 });
 

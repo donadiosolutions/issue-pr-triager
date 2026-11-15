@@ -136,7 +136,7 @@ function choiceValue(answers, name, allowed, unresolved) {
   return candidate;
 }
 
-function decisionFromStage1(response, item, catalog, candidates, evidenceTruncated) {
+function decisionFromStage1(response, item, catalog, candidates, evidenceTruncated, activeFields) {
   const answers = answerMap(response);
   const unresolved = [];
   const labels = [];
@@ -151,9 +151,9 @@ function decisionFromStage1(response, item, catalog, candidates, evidenceTruncat
       unresolved.push(name);
     }
   }
-  const type = choiceValue(answers, 'type', catalogNames(catalog?.types).map((entry) => entry.name), unresolved);
-  const priority = choiceValue(answers, 'priority', fieldOptions(catalog?.priority).map((entry) => entry.name), unresolved);
-  const effort = choiceValue(answers, 'effort', fieldOptions(catalog?.effort).map((entry) => entry.name), unresolved);
+  const type = activeFields.has('type') ? choiceValue(answers, 'type', catalogNames(catalog?.types).map((entry) => entry.name), unresolved) : null;
+  const priority = activeFields.has('priority') ? choiceValue(answers, 'priority', fieldOptions(catalog?.priority).map((entry) => entry.name), unresolved) : null;
+  const effort = activeFields.has('effort') ? choiceValue(answers, 'effort', fieldOptions(catalog?.effort).map((entry) => entry.name), unresolved) : null;
   const parent = parentFromStage1(answers, candidates, item.kind === 'pr' && evidenceTruncated, unresolved);
   return { labels, type, priority, effort, parent, unresolved: [...new Set(unresolved)], usage: usageRecord(response, 'gpt-6-luna') };
 }
@@ -186,11 +186,11 @@ function uniqueEnums(values, emptyValue = '__insufficient__') {
   return [...new Set([...values, emptyValue])];
 }
 
-function taskCodes(catalog, kind) {
-  return [...businessLabels(catalog).map(entry => `label:${entry.name}`), 'type', 'priority', 'effort', ...(kind === 'pr' ? ['parent'] : [])];
+function taskCodes(catalog, kind, activeFields) {
+  return [...businessLabels(catalog).map(entry => `label:${entry.name}`), ...['type', 'priority', 'effort'].filter(name => activeFields.has(name)), ...(kind === 'pr' ? ['parent'] : [])];
 }
 
-function stage2Schema(catalog, candidates, kind) {
+function stage2Schema(catalog, candidates, kind, activeFields) {
   const labelNames = businessLabels(catalog).map((entry) => entry.name);
   const typeNames = catalogNames(catalog?.types).map((entry) => entry.name);
   const priorityNames = fieldOptions(catalog?.priority).map((entry) => entry.name);
@@ -201,14 +201,14 @@ function stage2Schema(catalog, candidates, kind) {
     properties: {
       labels: { type: 'array', maxItems: labelNames.length, items: { type: 'object', additionalProperties: false,
         properties: { name: { type: 'string', enum: labelNames.length ? labelNames : ['__insufficient__'] }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['name', 'confidence', 'rationale'] } },
-      type: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(typeNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] },
-      priority: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(priorityNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] },
-      effort: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(effortNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] },
+      ...(activeFields.has('type') ? { type: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(typeNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] } } : {}),
+      ...(activeFields.has('priority') ? { priority: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(priorityNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] } } : {}),
+      ...(activeFields.has('effort') ? { effort: { type: 'object', additionalProperties: false, properties: { value: { type: 'string', enum: uniqueEnums(effortNames) }, confidence: { type: 'number' }, rationale: { type: 'string' } }, required: ['value', 'confidence', 'rationale'] } } : {}),
       ...(kind === 'pr' ? { parent: { type: 'object', additionalProperties: false,
         properties: { number: { type: 'integer', enum: [...new Set([0,-1,...numbers])], description: '0 means definitively no matching parent; -1 means insufficient evidence.' }, confidence: { type: 'number' }, margin: { type: 'number' }, fully_resolves: { type: 'boolean' }, rationale: { type: 'string' } },
         required: ['number', 'confidence', 'margin', 'fully_resolves', 'rationale'] } } : {}),
-      unresolved: { type: 'array', maxItems: 20, items: { type: 'string', enum: taskCodes(catalog, kind) } },
-    }, required: ['labels', 'type', 'priority', 'effort', ...(kind === 'pr' ? ['parent'] : []), 'unresolved'],
+      unresolved: { type: 'array', maxItems: 20, items: { type: 'string', enum: taskCodes(catalog, kind, activeFields) } },
+    }, required: ['labels', ...['type', 'priority', 'effort'].filter(name => activeFields.has(name)), ...(kind === 'pr' ? ['parent'] : []), 'unresolved'],
   };
 }
 
@@ -242,9 +242,9 @@ function stage2Value(field, allowed, key, unresolved) {
   return field.value;
 }
 
-function decisionFromStage2(payload, response, catalog, candidates, evidenceTruncated, kind) {
+function decisionFromStage2(payload, response, catalog, candidates, evidenceTruncated, kind, activeFields) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return fallbackDecision(undefined, kind);
-  const allowedTasks = taskCodes(catalog, kind);
+  const allowedTasks = taskCodes(catalog, kind, activeFields);
   const unresolved = [];
   if (!Array.isArray(payload.unresolved) || payload.unresolved.length > 20) unresolved.push('provider_response');
   else for (const code of payload.unresolved) unresolved.push(allowedTasks.includes(code) ? code : 'provider_response');
@@ -256,9 +256,9 @@ function decisionFromStage2(payload, response, catalog, candidates, evidenceTrun
     if (validLabels.includes(entry?.name) && confidence >= 0.85 && rationaleSafe(entry?.rationale)) labels.push(entry.name);
     else unresolved.push(validLabels.includes(entry?.name) ? `label:${entry.name}` : 'provider_response');
   }
-  const type = stage2Value(payload.type, catalogNames(catalog?.types).map((entry) => entry.name), 'type', unresolved);
-  const priority = stage2Value(payload.priority, fieldOptions(catalog?.priority).map((entry) => entry.name), 'priority', unresolved);
-  const effort = stage2Value(payload.effort, fieldOptions(catalog?.effort).map((entry) => entry.name), 'effort', unresolved);
+  const type = activeFields.has('type') ? stage2Value(payload.type, catalogNames(catalog?.types).map((entry) => entry.name), 'type', unresolved) : null;
+  const priority = activeFields.has('priority') ? stage2Value(payload.priority, fieldOptions(catalog?.priority).map((entry) => entry.name), 'priority', unresolved) : null;
+  const effort = activeFields.has('effort') ? stage2Value(payload.effort, fieldOptions(catalog?.effort).map((entry) => entry.name), 'effort', unresolved) : null;
   const parent = parentFromStage2(payload.parent, candidates, kind === 'pr' && evidenceTruncated, unresolved);
   return { labels: [...new Set(labels)], type, priority, effort, parent, unresolved: [...new Set(unresolved)].slice(0, 20), usage: usageRecord(response, 'gpt-6.1-terra') };
 }
@@ -286,7 +286,7 @@ function parentFromStage2(value, candidates, evidenceTruncated, unresolved) {
   return { number, confidence, margin, fullyResolves, status: 'match' };
 }
 
-function decisionQuestions(catalog, candidates) {
+function decisionQuestions(catalog, candidates, activeFields) {
   const questions = [];
   for (const label of businessLabels(catalog)) questions.push({ type: 'predicate', name: `label:${label.name}`, instructions: `Is ${JSON.stringify(label.name)} appropriate? Definition: ${stringValue(label.description, 'No description')}.` });
   for (const [name, options] of [
@@ -294,7 +294,7 @@ function decisionQuestions(catalog, candidates) {
     ['priority', fieldOptions(catalog?.priority)],
     ['effort', fieldOptions(catalog?.effort)],
   ]) {
-    if (options.length) {
+    if (activeFields.has(name) && options.length) {
       const choices = [...options.map((entry) => ({ value: entry.name, description: stringValue(entry.description, 'No description') })), { value: '__insufficient__', description: 'Evidence is inadequate to choose a catalog value.' }];
       questions.push({ type: 'choice', name, choices, instructions: `Choose the best ${name} using only these catalog values: ${options.map((entry) => `${entry.name}: ${stringValue(entry.description, 'No description')}`).join('; ')}. Use __insufficient__ when evidence is inadequate.` });
     }
@@ -312,14 +312,20 @@ function decisionQuestions(catalog, candidates) {
 function createClassifier({ token, fetch = globalThis.fetch, sleep, now, request } = {}) {
   let requestDeadline = Infinity;
   const send = request ?? createHttp({ token, origin: 'https://api.openai.com', fetch, sleep, now, deadline:()=>requestDeadline });
-  return async function classify({ item, catalog, candidates = [], stage, deadline = Infinity }) {
+  return async function classify({ item, catalog, candidates = [], stage, deadline = Infinity, fieldNames = ['type', 'priority', 'effort'] }) {
     if (stage !== 1 && stage !== 2) throw new TypeError('stage must be 1 or 2');
     if (item.kind !== 'pr' || !Array.isArray(candidates)) candidates = [];
+    const activeFields = new Set((Array.isArray(fieldNames) ? fieldNames : []).filter(name => ['type', 'priority', 'effort'].includes(name)));
     requestDeadline = deadline;
     const evidence = evidenceText(item, candidates);
+    if (!taskCodes(catalog,item.kind,activeFields).length) {
+      const result=fallbackDecision(undefined,item.kind);
+      result.unresolved=[];
+      return result;
+    }
     const rules = item.kind === 'pr' ? `${RULES} ${PARENT_RULES}` : RULES;
     if (stage === 1) {
-      const body = { model: 'gpt-6-luna', input: [{role:'developer',content:rules},{role:'user',content:evidence.text}], questions: decisionQuestions(catalog, candidates) };
+      const body = { model: 'gpt-6-luna', input: [{role:'developer',content:rules},{role:'user',content:evidence.text}], questions: decisionQuestions(catalog, candidates, activeFields) };
       if (!body.questions.length) {
         const result = fallbackDecision(undefined, item.kind);
         result.parent.status = item.kind === 'pr' && (candidates.length || evidence.truncated) ? 'uncertain' : 'none';
@@ -331,11 +337,11 @@ function createClassifier({ token, fetch = globalThis.fetch, sleep, now, request
         responses.push(response);
         if (!Array.isArray(response?.answers)) return fallbackDecision(undefined, item.kind);
       }
-      const result=decisionFromStage1({answers:responses.flatMap(response=>response.answers)},item,catalog,candidates,evidence.truncated);
+      const result=decisionFromStage1({answers:responses.flatMap(response=>response.answers)},item,catalog,candidates,evidence.truncated,activeFields);
       result.usage=responses.flatMap(response=>usageRecord(response,'gpt-6-luna'));
       return result;
     }
-    const schema = stage2Schema(catalog, candidates, item.kind);
+    const schema = stage2Schema(catalog, candidates, item.kind, activeFields);
     const body = {
       model: 'gpt-6.1-terra', store: false, reasoning:{effort:'low'}, max_output_tokens:4096,
       input: [
@@ -351,7 +357,7 @@ function createClassifier({ token, fetch = globalThis.fetch, sleep, now, request
       result.usage = usageRecord(response, 'gpt-6.1-terra');
       return result;
     }
-    return decisionFromStage2(output.value, response, catalog, candidates, evidence.truncated, item.kind);
+    return decisionFromStage2(output.value, response, catalog, candidates, evidence.truncated, item.kind, activeFields);
   };
 }
 

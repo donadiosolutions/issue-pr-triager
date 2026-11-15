@@ -25,6 +25,9 @@ inputs:
   reclassify:
     description: Refresh bot-owned values without replacing human overrides.
     default: 'false'
+  concurrency:
+    description: Maximum issues or pull requests processed in parallel, from 1 to 20.
+    default: '4'
   checkpoint-path:
     description: Local checkpoint file restored and uploaded by the caller.
   priority-field-name:
