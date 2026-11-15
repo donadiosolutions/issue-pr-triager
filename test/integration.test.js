@@ -108,6 +108,19 @@ test('real adapters request and fill missing fields while preserving existing is
     } else assert.deepEqual(s.projectValues,{'PR Type':'Feature','PR Effort':'5','PR Priority':'High'});
   }
 });
+test('real adapters preserve applied labels and finish fully populated items without provider calls',async()=>{
+  for(const kind of ['issue','pr']) {
+    const s=system(kind);s.currentLabels.push('bug');
+    if(kind==='issue') {
+      s.issue.type={name:'Bug'};
+      s.values.push({issue_field_id:4,single_select_option:{name:'High'}},{issue_field_id:6,single_select_option:{name:'1'}});
+    } else Object.assign(s.projectValues,{'PR Type':'Bug','PR Priority':'High','PR Effort':'1'});
+    await s.run({mode:'enroll',eventName:kind==='issue'?'issues':'pull_request_target',event:{action:'opened',issue:{number:1}}});
+    const result=await s.run();
+    assert.equal(result.processed,1);assert.equal(s.modelCalls.length,0);
+    assert.deepEqual(s.currentLabels,['bug']);assert.equal(s.state().phase,'complete');
+  }
+});
 
 test('real adapters enroll project membership before any model and add labels without the queue label',async()=>{
   const s=system();
@@ -123,7 +136,7 @@ test('real adapters enroll project membership before any model and add labels wi
   assert.equal(s.issue.type.name,'Bug');
 });
 
-test('real PR project field creation stays semantically stable and synchronize revisits a completed PR',async()=>{
+test('real PR field setup stays stable and synchronize needs no provider call for satisfied tasks',async()=>{
   const s=system('pr');
   await s.run({mode:'enroll',eventName:'pull_request_target',event:{action:'opened',pull_request:{number:1}}});
   let r=await s.run();
@@ -134,7 +147,7 @@ test('real PR project field creation stays semantically stable and synchronize r
   s.revise();
   r=await s.run({eventName:'pull_request_target',event:{action:'synchronize',pull_request:{number:1}}});
   assert.equal(r.processed,1);
-  assert.equal(s.modelCalls.length,2);
+  assert.equal(s.modelCalls.length,1);assert.deepEqual(r.usage,[]);
 });
 
 test('real filtered queue skips legacy items and human-removed bot labels remain removed after edits',async()=>{

@@ -29,7 +29,11 @@ function pendingFields(state, item, reclassify) {
 }
 function remainingUnresolved(state, item, reclassify) {
   const pending=pendingFields(state,item,reclassify);
-  return state.unresolved.filter(key=>!fields.slice(1).includes(key)||pending.includes(key));
+  return state.unresolved.filter(key=>{
+    if(key.startsWith('label:'))return !item.labels.includes(key.slice(6))&&!state.removedLabels.includes(key.slice(6));
+    if(key==='parent'&&item.kind==='pr'&&item.associations.length)return false;
+    return !fields.slice(1).includes(key)||pending.includes(key);
+  });
 }
 
 export async function runEngine(config, {github,classify,now=Date.now,checkpoint=null,saveCheckpoint=async()=>{}}) {
@@ -126,7 +130,8 @@ export async function runEngine(config, {github,classify,now=Date.now,checkpoint
         state.pass++;state.attempts++;state.phase='pending';state.unresolved=['model pending'];
         await persist();
         try {
-          state.decision=validateDecision(await phase('classify',()=>classify({item:modelEvidence(item,bot),catalog,candidates,fieldNames:pendingFields(state,item,config.reclassify),stage:state.pass,deadline})),catalog,candidates);
+          const choices={...catalog,labels:catalog.labels.filter(label=>!item.labels.includes(label.name)&&!state.removedLabels.includes(label.name))};
+          state.decision=validateDecision(await phase('classify',()=>classify({item:modelEvidence(item,bot),catalog:choices,candidates,fieldNames:pendingFields(state,item,config.reclassify),stage:state.pass,deadline})),catalog,candidates);
           if(Array.isArray(state.decision.usage))result.usage.push(...state.decision.usage);
           state.unresolved=[...state.decision.unresolved];
         } catch (error) {

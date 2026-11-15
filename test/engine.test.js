@@ -56,6 +56,35 @@ test('classification requests and fills only missing issue and PR fields',async(
   assert.deepEqual(lastState(f).ownership,{labels:['bug'],priority:'High'});
  }
 });
+test('classification omits labels already present or removed by humans',async()=>{
+ for(const kind of ['issue','pr']) for(const present of [false,true]) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;await enroll(f);
+  if(present)item.labels.push('bug');
+  else {const state=lastState(f);state.removedLabels=['bug'];await f.github.writeState(1,state,100);}
+  const result=await runEngine(config,{github:f.github,now:()=>time,classify:async({catalog:choices})=>{
+   assert.deepEqual(choices.labels,[]);
+   return {...structuredClone(decision),labels:[],unresolved:['label:bug']};
+  }});
+  assert.equal(result.processed,1);assert.equal(item.labels.includes('triage'),false);assert.equal(item.labels.includes('bug'),present);
+ }
+});
+test('remaining label and parent work keeps triage while existing PR associations satisfy parent tasks',async()=>{
+ for(const associated of [false,true]) {
+  let candidates=0;const f=fixture({candidates:async()=>{candidates++;return [];}});const item=f.items.get(1);item.kind='pr';item.associations=associated?[9]:[];await enroll(f);
+  const result=await runEngine(config,{github:f.github,now:()=>time,classify:async()=>({...structuredClone(decision),unresolved:['parent']})});
+  assert.equal(candidates,1);assert.equal(result.processed,associated?1:0);assert.equal(item.labels.includes('triage'),!associated);
+ }
+ const f=fixture();await enroll(f);
+ const result=await runEngine(config,{github:f.github,now:()=>time,classify:async()=>({...structuredClone(decision),labels:[],unresolved:['label:bug']})});
+ assert.equal(result.deferred,1);assert.deepEqual(lastState(f).unresolved,['label:bug']);
+});
+test('existing reviews for labels already applied complete without another model call',async()=>{
+ const f=fixture();await enroll(f);
+ const classify=async()=>({...structuredClone(decision),unresolved:['uncertain']});
+ const deps={github:f.github,classify,now:()=>time};await runEngine(config,deps);await runEngine(config,deps);
+ const state=lastState(f);state.unresolved=['label:bug'];await f.github.writeState(1,state,100);
+ assert.equal((await f.run()).processed,1);assert.equal(f.classifyCount,0);assert.equal(f.items.get(1).labels.includes('triage'),false);
+});
 test('cleared bot-owned issue and PR fields are filled without treating repairs as new evidence',async()=>{
  for(const kind of ['issue','pr']) for(const field of ['type','priority','effort']) {
   const f=fixture();const item=f.items.get(1);item.kind=kind;await enroll(f);await f.run();
