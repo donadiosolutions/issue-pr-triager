@@ -30,6 +30,80 @@ test('semantic second pass runs on next invocation and exhaustion never charges 
 test('human populated fields stay intact and reclassification only changes bot ownership',async()=>{
  const f=fixture();f.items.get(1).type='Feature';f.items.get(1).priority='Human';f.items.get(1).effort='Large';await enroll(f);await f.run();assert.equal(f.items.get(1).type,'Feature');assert.equal(f.items.get(1).priority,'Human');assert.equal(f.items.get(1).effort,'Large');
 });
+test('preserved issue and PR fields satisfy unresolved model choices',async()=>{
+ for(const kind of ['issue','pr']) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;
+  const values=kind==='issue'?item:item.projectValues;
+  Object.assign(values,{type:'Feature',priority:'Low',effort:'5'});await enroll(f);
+  const r=await runEngine(config,{github:f.github,now:()=>time,classify:async()=>({...structuredClone(decision),type:null,priority:null,effort:null,unresolved:['type','priority','effort']})});
+  assert.equal(r.processed,1);assert.equal(item.labels.includes('triage'),false);
+  assert.equal(lastState(f).phase,'complete');assert.deepEqual(lastState(f).unresolved,[]);
+  assert.deepEqual([values.type,values.priority,values.effort],['Feature','Low','5']);
+  assert.deepEqual(lastState(f).ownership,{labels:['bug']});
+ }
+});
+test('classification requests and fills only missing issue and PR fields',async()=>{
+ for(const kind of ['issue','pr']) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;
+  const values=kind==='issue'?item:item.projectValues;
+  Object.assign(values,{type:'Feature',effort:'5'});await enroll(f);
+  const r=await runEngine(config,{github:f.github,now:()=>time,classify:async({fieldNames})=>{
+   assert.deepEqual(fieldNames,['priority']);
+   return {...structuredClone(decision),type:null,effort:null};
+  }});
+  assert.equal(r.processed,1);assert.equal(item.labels.includes('triage'),false);
+  assert.deepEqual([values.type,values.priority,values.effort],['Feature','High','5']);
+  assert.deepEqual(lastState(f).ownership,{labels:['bug'],priority:'High'});
+ }
+});
+test('cleared bot-owned issue and PR fields are filled without treating repairs as new evidence',async()=>{
+ for(const kind of ['issue','pr']) for(const field of ['type','priority','effort']) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;await enroll(f);await f.run();
+  const values=kind==='issue'?item:item.projectValues;values[field]=null;await f.github.setTriage(1,true);
+  const result=await f.run();
+  assert.equal(result.processed,1);assert.equal(result.deferred,0);assert.equal(f.classifyCount,2);
+  assert.equal(values[field],decision[field]);assert.equal(item.labels.includes('triage'),false);
+  assert.equal(lastState(f).pass,1);assert.equal(lastState(f).phase,'complete');
+ }
+});
+test('second pass fills remaining fields without requesting completed first pass fields',async()=>{
+ for(const kind of ['issue','pr']) {
+  const f=fixture();f.items.get(1).kind=kind;await enroll(f);
+  const classify=async({stage,fieldNames})=>{
+   assert.deepEqual(fieldNames,stage===1?['type','priority','effort']:['priority','effort']);
+   return {...structuredClone(decision),...(stage===1?{priority:null,effort:null,unresolved:['priority','effort']}:{type:null})};
+  };
+  const deps={github:f.github,classify,now:()=>time};
+  assert.equal((await runEngine(config,deps)).deferred,1);
+  assert.equal((await runEngine(config,deps)).processed,1);
+  const item=f.items.get(1);const values=kind==='issue'?item:item.projectValues;
+  assert.deepEqual([values.type,values.priority,values.effort],['Bug','High','Small']);assert.equal(item.labels.includes('triage'),false);
+ }
+});
+test('unchanged review with preserved fields completes without another model call',async()=>{
+ for(const kind of ['issue','pr']) for(const dryRun of [false,true]) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;
+  Object.assign(kind==='issue'?item:item.projectValues,{type:'Feature',priority:'Low',effort:'5'});await enroll(f);
+  const classify=async()=>({...structuredClone(decision),unresolved:['uncertain']});
+  await runEngine(config,{github:f.github,classify,now:()=>time});await runEngine(config,{github:f.github,classify,now:()=>time});
+  const state=lastState(f);state.unresolved=['type','priority','effort'];await f.github.writeState(1,state,100);f.calls.length=0;
+  const r=await f.run({dryRun});assert.equal(r.processed,1);assert.equal(f.classifyCount,0);
+  assert.equal(item.labels.includes('triage'),dryRun);assert.equal(lastState(f).phase,dryRun?'review':'complete');
+  if(dryRun)assert.deepEqual(f.calls.filter(c=>c[0]!=='queue'),[]);
+ }
+});
+test('missing fields and explicit reclassification uncertainty keep triage pending',async()=>{
+ for(const kind of ['issue','pr']) for(const reclassify of [false,true]) {
+  const f=fixture();const item=f.items.get(1);item.kind=kind;await enroll(f);
+  if(reclassify){await f.run();await f.github.setTriage(1,true);}
+  const classify=async()=>({...structuredClone(decision),type:null,unresolved:['type']});
+  const deps={github:f.github,classify,now:()=>time};const options={...config,reclassify};
+  const first=await runEngine(reclassify?{...options,eventName:'workflow_dispatch',itemNumber:1}:options,deps);assert.equal(first.deferred,1);
+  const second=await runEngine(options,deps);assert.equal(second.humanReview,1);
+  const third=await runEngine(options,deps);assert.equal(third.humanReview,1);
+  assert.equal(item.labels.includes('triage'),true);assert.deepEqual(lastState(f).unresolved,['type']);
+ }
+});
 test('dry run manual selection makes no remote writes',async()=>{
  const f=fixture();const r=await f.run({dryRun:true,eventName:'workflow_dispatch',itemNumber:1});assert.equal(r.processed,1);assert.deepEqual(f.calls.filter(c=>c[0]!=='model'),[]);assert.equal(f.items.get(1).comments.length,0);
 });
@@ -178,7 +252,7 @@ test('unchanged review avoids writes and candidate reads and cannot starve backf
  const base=structuredClone(f.items.get(1));for(let i=2;i<=30;i++)f.items.set(i,{...structuredClone(base),number:i});f.items.set(100,{...structuredClone(base),kind:'issue',number:100,comments:[],labels:[]});const cp={version:1,repository:'o/r',projectNumber:1,active:true,source:'workflow_dispatch',authorizedAt:new Date(time).toISOString(),page:1,offset:0};f.github.openPage=async()=>({items:[{number:100,state:'open',createdAt:'2026-11-01'}],nextPage:null});const next=await runEngine(config,{github:f.github,classify:f.classify,now:()=>time,checkpoint:cp});assert.equal(next.humanReview,10);assert.equal(next.processed,1);assert.equal(next.checkpoint.active,false);
 });
 test('deadline expiration miditem stops writes and preserves pending queue numbers',async()=>{
- const f=fixture();await enroll(f);f.items.set(2,{...structuredClone(f.items.get(1)),number:2});let clock=time;f.github.setDeadline=deadline=>assert.equal(deadline,time+100);const classify=async args=>{assert.equal(args.deadline,time+100);clock=time+100;return structuredClone(decision);};const r=await runEngine({...config,deadlineMs:100},{github:f.github,classify,now:()=>clock});assert.equal(r.deferred,1);assert.equal(r.failed,0);assert.equal(f.items.get(1).type,null);assert.deepEqual(r.checkpoint.queuePending,[2]);assert.equal(lastState(f).pass,1);
+ const f=fixture();await enroll(f);f.items.set(2,{...structuredClone(f.items.get(1)),number:2});let clock=time;f.github.setDeadline=deadline=>assert.equal(deadline,time+100);const classify=async args=>{assert.equal(args.deadline,time+100);clock=time+100;return structuredClone(decision);};const r=await runEngine({...config,concurrency:1,deadlineMs:100},{github:f.github,classify,now:()=>clock});assert.equal(r.deferred,1);assert.equal(r.failed,0);assert.equal(f.items.get(1).type,null);assert.deepEqual(r.checkpoint.queuePending,[2]);assert.equal(lastState(f).pass,1);
 });
 test('semantic catalogs and model evidence ignore bot bookkeeping and transport metadata',async()=>{
  const f=fixture();Object.assign(f.items.get(1),{kind:'pr',baseBranch:'main',body:'details\n<!-- issue-pr-triager:link -->\nCloses #9\n<!-- /issue-pr-triager:link -->'});await enroll(f);f.items.get(1).comments.push({id:200,author:'human',body:'<!-- issue-pr-triager:v1 quoted --> human evidence'});let calls=0;f.github.discover=async()=>({...structuredClone(catalog),updatedAt:String(calls++),project:{id:'p',fields:[{id:'custom',dataType:calls?'SINGLE_SELECT':undefined}]}});const r=await runEngine(config,{github:f.github,now:()=>time,classify:async({item})=>{assert.equal(item.comments.length,1);assert.equal(item.comments[0].author,'human');assert.equal(item.body,'details');return structuredClone(decision);}});assert.equal(r.processed,1);
@@ -215,4 +289,109 @@ test('explicit manual reclassification renews exhausted review and completed pas
 });
 test('automatic reclassify flag cannot renew unchanged exhausted review passes',async()=>{
  const f=fixture();await enroll(f);let calls=0;const classify=async()=>{calls++;return {...structuredClone(decision),unresolved:['uncertain']};};const deps={github:f.github,classify,now:()=>time};await runEngine(config,deps);await runEngine(config,deps);const r=await runEngine({...config,reclassify:true},deps);assert.equal(r.humanReview,1);assert.equal(calls,2);assert.equal(lastState(f).pass,2);
+});
+function manyItems(count,kind='issue') {
+ const f=fixture();const base=structuredClone(f.items.get(1));
+ for(let number=1;number<=count;number++)f.items.set(number,{...structuredClone(base),number,id:`i${number}`,kind,baseBranch:kind==='pr'?'main':null,labels:['triage'],comments:[{id:100,author:'bot',body:`<!-- issue-pr-triager:v1 ${JSON.stringify(newState(config,'manual'))} -->`}]});
+ return f;
+}
+test('item workers default to four and honor configured concurrency and the twenty-item cap',async()=>{
+ for(const concurrency of [undefined,2,20]) {
+  const f=manyItems(26);const gate=Promise.withResolvers();const ready=Promise.withResolvers();
+  const expected=concurrency??4;let active=0,maximum=0;const started=new Set();
+  const classify=async({item})=>{
+   assert.equal(started.has(item.number),false);started.add(item.number);
+   active++;maximum=Math.max(maximum,active);if(active===expected)ready.resolve();
+   await gate.promise;active--;return structuredClone(decision);
+  };
+  const pending=runEngine({...config,concurrency,batchSize:99},{github:f.github,classify,now:()=>time});
+  await ready.promise;assert.equal(started.size,expected);assert.equal(active,expected);gate.resolve();
+  const result=await pending;assert.equal(maximum,expected);assert.equal(active,0);assert.equal(result.processed,20);assert.equal(started.size,20);
+ }
+});
+test('duplicate queue entries and overlapping backfill items have a single owner per run',async()=>{
+ for(const concurrency of [1,4]) {
+  const f=manyItems(3);f.github.queuePage=async()=>({items:[{number:1},{number:1},{number:2}],nextCursor:null});
+  const calls=[];const result=await runEngine({...config,concurrency,eventName:'workflow_dispatch',mode:'backfill'},{github:f.github,now:()=>time,classify:async({item})=>{calls.push(item.number);return structuredClone(decision);}});
+  assert.equal(result.processed,3);assert.deepEqual(calls.sort(),[1,2,3]);assert.equal(result.backfillRemaining,false);
+ }
+});
+test('queue checkpoint saves serialize and retain unfinished earlier items until they complete',async()=>{
+ const f=manyItems(4);const gate=Promise.withResolvers();const savedOutOfOrder=Promise.withResolvers();const saved=[];let activeSaves=0;
+ const pending=runEngine({...config,concurrency:2},{github:f.github,now:()=>time,classify:async({item})=>{if(item.number===1)await gate.promise;return structuredClone(decision);},saveCheckpoint:async cp=>{
+  assert.equal(activeSaves++,0);await Promise.resolve();saved.push(cp);activeSaves--;
+  if(f.items.get(2).type==='Bug'&&cp.queuePending.includes(1))savedOutOfOrder.resolve();
+ }});
+ await savedOutOfOrder.promise;assert.deepEqual(saved.at(-1).queuePending,[1,2,3,4]);assert.equal(f.items.get(1).type,null);
+ gate.resolve();const result=await pending;assert.equal(result.processed,4);assert.deepEqual(result.checkpoint.queuePending,[]);assert.equal(activeSaves,0);
+ for(const cp of saved)if(cp.queuePending.includes(1))assert.deepEqual(cp.queuePending,[1,2,3,4]);
+});
+test('backfill checkpoint offsets stay behind unfinished items and preserve authorization',async()=>{
+ const f=manyItems(4);f.github.queuePage=async()=>({items:[],nextCursor:null});
+ const gate=Promise.withResolvers();const savedOutOfOrder=Promise.withResolvers();const saved=[];
+ const pending=runEngine({...config,concurrency:2,eventName:'workflow_dispatch',mode:'backfill'},{github:f.github,now:()=>time,classify:async({item})=>{if(item.number===1)await gate.promise;return structuredClone(decision);},saveCheckpoint:async cp=>{
+  saved.push(cp);if(f.items.get(2).type==='Bug'&&cp.offset===0)savedOutOfOrder.resolve();
+ }});
+ await savedOutOfOrder.promise;assert.equal(saved.at(-1).offset,0);assert.equal(saved.at(-1).active,true);
+ gate.resolve();const result=await pending;assert.equal(result.processed,4);assert.equal(result.checkpoint.offset,4);assert.equal(result.backfillRemaining,false);
+ for(const cp of saved){assert.equal(cp.source,'workflow_dispatch');assert.equal(cp.authorizedAt,new Date(time).toISOString());}
+});
+test('checkpoint failures stop dispatch and wait for every in-flight worker before rejecting',async()=>{
+ const f=manyItems(5);const gate=Promise.withResolvers();const failure=Promise.withResolvers();let settled=false;const started=[];
+ const pending=runEngine({...config,concurrency:2},{github:f.github,now:()=>time,classify:async({item})=>{started.push(item.number);if(item.number===1)await gate.promise;return structuredClone(decision);},saveCheckpoint:async cp=>{
+  if(f.items.get(2).type==='Bug'){failure.resolve();throw new Error('checkpoint unavailable');}
+ }});
+ const rejected=assert.rejects(pending,/checkpoint unavailable/).then(()=>{settled=true;});
+ await failure.promise;assert.equal(settled,false);assert.deepEqual(started,[1,2]);
+ gate.resolve();await rejected;assert.equal(f.items.get(1).type,'Bug');assert.deepEqual(started,[1,2]);
+});
+test('concurrent operation failures retain saved decisions and do not block independent items',async()=>{
+ const f=manyItems(4);const apply=f.github.apply;
+ f.github.apply=async(...args)=>{if(args[0].number===1&&'priority' in args[2])throw new Error('partial write');return apply(...args);};
+ const result=await f.run();assert.equal(result.failed,1);assert.equal(result.processed,3);assert.deepEqual(result.checkpoint.queuePending,[]);
+ const state=lastState(f);assert.ok(state.decision);assert.deepEqual(state.pending,{field:'priority',value:'High'});
+ f.github.apply=apply;assert.equal((await f.run()).processed,1);assert.equal(f.classifyCount,4);
+});
+test('concurrent deadline exhaustion starts no more items and retains undispatched queue work',async()=>{
+ const f=manyItems(6);let clock=time;const entered=Promise.withResolvers();const release=Promise.withResolvers();let active=0;
+ const pending=runEngine({...config,concurrency:2,deadlineMs:100},{github:f.github,now:()=>clock,classify:async()=>{
+  active++;if(active===2)entered.resolve();await release.promise;return structuredClone(decision);
+ }});
+ await entered.promise;clock=time+100;release.resolve();const result=await pending;
+ assert.equal(active,2);assert.equal(result.deferred,2);assert.equal(result.failed,0);assert.deepEqual(result.checkpoint.queuePending,[3,4,5,6]);assert.equal(f.items.get(3).type,null);
+});
+test('PR field setup rediscovers after competing synchronization and item catalogs stay private',async()=>{
+ const f=manyItems(4,'pr');let stored=structuredClone(catalog),syncing=0,created=0;const catalogs=[];
+ f.github.discover=async()=>structuredClone(stored);
+ f.github.syncPrFields=async c=>{
+  assert.equal(syncing++,0);await Promise.resolve();
+  for(const key of ['type','priority','effort']) {
+   const name=`PR ${key}`;
+   if(!c.project.fields.some(field=>field.name===name)) {
+    assert.equal(stored.project.fields.some(field=>field.name===name),false,'stale competing catalog');
+    c.project.fields.push({id:name,name});created++;
+   }
+  }
+  stored=structuredClone(c);syncing--;return c;
+ };
+ const result=await runEngine(config,{github:f.github,now:()=>time,classify:async({item,catalog:c})=>{
+  assert.equal(catalogs.includes(c),false);c.owner=item.number;catalogs.push(c);await Promise.resolve();return structuredClone(decision);
+ }});
+ assert.equal(result.processed,4);assert.equal(created,3);assert.equal(syncing,0);assert.equal(catalogs.length,4);assert.deepEqual(catalogs.map(c=>c.owner).sort(),[1,2,3,4]);
+});
+test('a rejected PR field synchronization releases the coordinator for other workers',async()=>{
+ const f=manyItems(2,'pr');let failed=false;
+ f.github.syncPrFields=async c=>{if(!failed){failed=true;throw new Error('fields unavailable');}return c;};
+ const result=await f.run();assert.equal(result.failed,1);assert.equal(result.processed,1);assert.equal(f.classifyCount,1);
+});
+test('authorized backfill enrolls a legacy triage item skipped by duplicate queue workers',async()=>{
+ for(const eventName of ['workflow_dispatch','schedule']) {
+  const f=fixture();f.items.get(1).labels=['triage'];let activeReads=0,models=0,enrollments=0;
+  const get=f.github.getItem;f.github.getItem=async number=>{assert.equal(activeReads++,0);await Promise.resolve();const item=await get(number);activeReads--;return item;};
+  f.github.queuePage=async()=>({items:Array.from({length:8},()=>({number:1})),nextCursor:null});
+  const write=f.github.writeState;f.github.writeState=async(number,state,id)=>{if(id==null)enrollments++;return write(number,state,id);};
+  const checkpoint={version:1,repository:'o/r',projectNumber:1,active:true,source:'workflow_dispatch',authorizedAt:new Date(time).toISOString(),page:1,offset:0};
+  const result=await runEngine({...config,mode:'backfill',eventName},{github:f.github,now:()=>time,checkpoint:eventName==='schedule'?checkpoint:null,classify:async()=>{models++;return structuredClone(decision);}});
+  assert.equal(result.processed,1);assert.equal(models,1);assert.equal(enrollments,1);assert.equal(lastState(f).enrollmentSource,'manual');assert.equal(lastState(f).phase,'complete');assert.equal(result.backfillRemaining,false);assert.equal(activeReads,0);
+ }
 });

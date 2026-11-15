@@ -51,7 +51,7 @@ Create an installation token with pinned `actions/create-github-app-token`. Rest
 Use separate enrollment and processing jobs:
 
 1. `issues: opened` and `pull_request_target: opened` call `mode: enroll`. This records durable queue state and project membership before classification. Keep enrollment outside the worker concurrency group.
-2. A worker calls `mode: process` after enrollment, on edits/reopening/PR synchronization, or every 10 minutes. Serialize workers by consumer repository; do not cancel an active worker.
+2. A processing job calls `mode: process` after enrollment, on edits/reopening/PR synchronization, or every 10 minutes. Serialize jobs by consumer repository; do not cancel an active job. Each invocation processes up to four different items in parallel by default; set `concurrency` from 1 to 20 to change the worker count. The batch remains limited to 20 items.
 3. `workflow_dispatch` may select an existing `item-number` or explicitly start `mode: backfill`. Default its backfill input to `false`. Use `dry-run: true` to inspect decisions first.
 4. Call `mode: checkpoint` with the caller's `${{ github.token }}` and `actions: read` permission. Its `checkpoint-artifact-id` and `checkpoint-run-id` outputs identify the latest artifact from the same trusted workflow and default branch. Pass these to pinned `actions/download-artifact`, then upload updated progress after processing. Lookup inspects at most 100 artifacts within a 60-second deadline. A dry run must not publish backfill authorization. Checkpoints expire after 30 days.
 5. Ignore follow-up events authored by the triager App. On `labeled`, run only for `triage`.
@@ -73,6 +73,7 @@ For `pull_request_target`, execute only the pinned Action and trusted caller ste
 | `item-number` | Empty | Optional item to enroll through manual execution |
 | `dry-run` | `false` | Report intended work without GitHub changes |
 | `reclassify` | `false` | Refresh bot-owned values that still match their ownership record |
+| `concurrency` | `4` | Maximum items processed in parallel; integer from 1 to 20 |
 | `checkpoint-path` | Runner temporary directory | Local JSON checkpoint for the caller to persist |
 | `priority-field-name` | `Priority` | Organization priority field name |
 | `effort-field-name` | `Effort` | Organization effort field name |
@@ -83,7 +84,7 @@ Outputs: `processed`, `deferred`, `failed`, `human-review`, `backfill-remaining`
 
 ## Classification and review
 
-Issues receive native labels, issue type, Priority, and Effort. GitHub does not support native issue types or organization issue fields on PRs, so the Action creates `PR Type`, `PR Priority`, and `PR Effort` single-select project fields. Their options follow the organization catalogs; historical selections are retained.
+Issues receive native labels, issue type, Priority, and Effort. GitHub does not support native issue types or organization issue fields on PRs, so the Action creates `PR Type`, `PR Priority`, and `PR Effort` single-select project fields. Their options follow the organization catalogs; historical selections are retained. Each semantic pass requests only fields that still need values, plus matching bot-owned fields when `reclassify` is enabled. A second pass fills remaining gaps without requesting fields completed by the first pass.
 
 The first semantic pass uses `gpt-6-luna` through Decisions. Unresolved work gets one second pass through Responses with `gpt-6.1-terra`. Model output must match the live catalogs; confidence below 0.85 defers the decision. Effort is relative story effort, not hours. Existing values remain intact; explicit reclassification replaces only values still owned by the bot.
 
@@ -91,7 +92,7 @@ The Action sends bounded issue/PR text, relevant discussion, candidate issues, a
 
 A PR link requires a unique same-repository candidate, confidence of at least 0.95, a margin of at least 0.15, and evidence that the PR fully resolves the issue. Existing associations are preserved. For a qualifying PR targeting the default branch, the Action appends one marked `Closes #N` block. This closes the issue when merged. Partial, ambiguous, and non-default-branch matches remain for review; no-parent is a valid outcome.
 
-`triage` remains while work is pending. One bot-owned progress comment records enrollment, fingerprints, ownership, and unresolved reasons. After two unchanged semantic passes, the Action stops making paid calls and retains the label for human review. Transport retries are bounded; saved valid decisions can resume partially completed writes.
+`triage` remains while work is pending and is removed after completion. Populated fields being preserved do not require another model choice. Existing review states whose only blockers are preserved fields complete without another paid request. One bot-owned progress comment records enrollment, fingerprints, ownership, and unresolved reasons. After two unchanged semantic passes, the Action stops making paid calls and retains the label for human review. Transport retries are bounded; saved valid decisions can resume partially completed writes.
 
 ## Development and coverage
 

@@ -10,7 +10,7 @@ import { discoverCheckpoint as defaultDiscoverCheckpoint } from './checkpoint.js
 const MAX_CHECKPOINT_BYTES = 1024 * 1024;
 const INPUTS = [
   'github-token', 'openai-api-token', 'project-number', 'mode', 'item-number',
-  'dry-run', 'reclassify', 'checkpoint-path', 'priority-field-name', 'effort-field-name'
+  'dry-run', 'reclassify', 'concurrency', 'checkpoint-path', 'priority-field-name', 'effort-field-name'
 ];
 
 function input(env, name) {
@@ -151,6 +151,8 @@ export async function runAction(env = process.env, dependencies = {}) {
   if (!['enroll', 'process', 'backfill', 'checkpoint'].includes(mode)) throw new Error('Invalid mode: expected enroll, process, backfill, or checkpoint.');
   const dryRun = booleanInput(values['dry-run'], 'dry-run');
   const reclassify = booleanInput(values.reclassify, 'reclassify');
+  const concurrency = positiveInteger(values.concurrency || '4', 'concurrency');
+  if (concurrency > 20) throw new Error('Invalid concurrency: expected an integer from 1 to 20.');
   if (!['enroll', 'checkpoint'].includes(mode) && !values['openai-api-token']) throw new Error('openai-api-token is required.');
   const eventText = await fs.readFile(env.GITHUB_EVENT_PATH, 'utf8');
   let event;
@@ -180,7 +182,7 @@ export async function runAction(env = process.env, dependencies = {}) {
   const config = {
     repository, projectNumber, priorityFieldName: values['priority-field-name'] || 'Priority',
     effortFieldName: values['effort-field-name'] || 'Effort', mode, itemNumber,
-    dryRun, reclassify, eventName: env.GITHUB_EVENT_NAME, event
+    dryRun, reclassify, concurrency, eventName: env.GITHUB_EVENT_NAME, event
   };
   const clock = dependencies.now ?? Date.now;
   const observedTime = clock();

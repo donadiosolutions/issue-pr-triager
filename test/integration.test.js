@@ -86,8 +86,28 @@ function system(kind='issue') {
   }});
   const run=async(extra={},checkpoint=null)=>runEngine({...cfg,...extra},{github,classify,now,checkpoint});
   const state=()=>readState(comments.map(c=>({id:c.id,body:c.body,author:c.user.login})),bot,cfg).state;
-  return {github,run,state,issue,currentLabels,projectValues,memberships,modelCalls,writes,revise:()=>{revision='second'}};
+  return {github,run,state,issue,currentLabels,values,projectValues,memberships,modelCalls,writes,revise:()=>{revision='second'}};
 }
+
+test('real adapters request and fill missing fields while preserving existing issue and PR values',async()=>{
+  for(const kind of ['issue','pr']) {
+    const s=system(kind);
+    if(kind==='issue') {
+      s.issue.type={name:'Feature'};
+      s.values.push({issue_field_id:6,single_select_option:{name:'5'}});
+    } else Object.assign(s.projectValues,{'PR Type':'Feature','PR Effort':'5'});
+    await s.run({mode:'enroll',eventName:kind==='issue'?'issues':'pull_request_target',event:{action:'opened',issue:{number:1}}});
+    const result=await s.run();
+    assert.equal(result.failed,0,JSON.stringify(result.diagnostics));assert.equal(result.processed,1);
+    assert.deepEqual(s.modelCalls[0].body.questions.map(q=>q.name),['label:bug','priority']);
+    assert.deepEqual(s.currentLabels,['bug']);assert.equal(s.state().phase,'complete');
+    assert.deepEqual(s.state().ownership,{labels:['bug'],priority:'High'});
+    if(kind==='issue') {
+      assert.equal(s.issue.type.name,'Feature');
+      assert.deepEqual(s.values,[{issue_field_id:6,single_select_option:{name:'5'}},{issue_field_id:4,single_select_option:{name:'High'}}]);
+    } else assert.deepEqual(s.projectValues,{'PR Type':'Feature','PR Effort':'5','PR Priority':'High'});
+  }
+});
 
 test('real adapters enroll project membership before any model and add labels without the queue label',async()=>{
   const s=system();
