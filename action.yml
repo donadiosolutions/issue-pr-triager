@@ -6,7 +6,7 @@ branding:
   color: gray-dark
 inputs:
   github-token:
-    description: Short-lived GitHub App token with Issues, Pull requests, and organization Projects write access.
+    description: Scoped App token for processing, or the caller GITHUB_TOKEN with Actions read access for checkpoint lookup.
     required: true
   openai-api-token:
     description: OpenAI API token; supply secrets.TRIAGER_TOKEN from the caller.
@@ -15,7 +15,7 @@ inputs:
     description: Destination organization project number.
     required: true
   mode:
-    description: enroll, process, or backfill. Backfill must be started manually.
+    description: enroll, process, backfill, or read-only checkpoint lookup. Backfill must be started manually.
     default: process
   item-number:
     description: Optional issue or pull request number; otherwise use the event or enrolled queue.
@@ -46,6 +46,10 @@ outputs:
     description: Whether manually authorized backfill discovery remains.
   checkpoint-path:
     description: Local checkpoint file to upload, when present.
+  checkpoint-artifact-id:
+    description: Trusted checkpoint artifact ID found in checkpoint mode, when present.
+  checkpoint-run-id:
+    description: Workflow run containing the trusted checkpoint artifact, when present.
 runs:
   using: node24
   main: src/index.js

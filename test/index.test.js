@@ -98,3 +98,25 @@ test('main escapes workflow command characters after credential redaction', asyn
     assert.equal(line, '::error::bad [REDACTED]%0D%0A[REDACTED]');
   } finally { process.exitCode = exitCode; }
 });
+
+test('real entrypoint discovers checkpoint IDs without OpenAI or filesystem artifacts', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'triager-checkpoint-cli-'));
+  try {
+    const eventPath = join(directory, 'event.json');
+    const outputPath = join(directory, 'output');
+    await writeFile(eventPath, JSON.stringify({ repository: { id: 21, default_branch: 'main' } }));
+    const result = await runCli(['--import', './test/fixtures/runtime-preload.mjs', 'src/index.js'], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        GITHUB_REPOSITORY: 'org/repo', GITHUB_EVENT_PATH: eventPath, GITHUB_EVENT_NAME: 'workflow_dispatch',
+        GITHUB_WORKFLOW_REF: 'org/repo/.github/workflows/triage.yml@main', GITHUB_OUTPUT: outputPath,
+        'INPUT_GITHUB-TOKEN': 'read-only-token', 'INPUT_PROJECT-NUMBER': '7', INPUT_MODE: 'checkpoint'
+      }
+    });
+    assert.equal(result.code, 0, result.stderr);
+    const output = await readFile(outputPath, 'utf8');
+    assert.match(output, /checkpoint-artifact-id=\ncheckpoint-run-id=\n/);
+    assert.doesNotMatch(output, /checkpoint-path=/);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

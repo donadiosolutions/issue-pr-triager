@@ -203,3 +203,16 @@ test('queue continuation reaches pending work after more than twenty terminal re
  const f=fixture();await enroll(f);const classify=async()=>({...decision,unresolved:['uncertain']});await runEngine(config,{github:f.github,classify,now:()=>time});await runEngine(config,{github:f.github,classify,now:()=>time});const reviewed=structuredClone(f.items.get(1));for(let i=2;i<=22;i++)f.items.set(i,{...structuredClone(reviewed),number:i});f.items.set(23,{...structuredClone(reviewed),number:23,comments:[]});await f.github.writeState(23,newState(config,'manual'));
  let r=await f.run();assert.equal(r.humanReview,20);assert.equal(r.processed,0);assert.equal(r.checkpoint.queueCursor,'20');r=await runEngine(config,{github:f.github,classify:f.classify,now:()=>time,checkpoint:r.checkpoint});assert.equal(r.humanReview,2);assert.equal(r.processed,1);assert.equal(f.classifyCount,1);
 });
+test('explicit manual reclassification renews exhausted review and completed pass budgets',async()=>{
+ for(const complete of [false,true]) {
+  const f=fixture();await enroll(f);f.items.get(1).type='Bug';f.items.get(1).priority='Human priority';const enrolled=lastState(f);enrolled.ownership.type='Bug';enrolled.removedLabels=['bug'];await f.github.writeState(1,enrolled,100);
+  const stages=[];const classify=async({stage})=>{stages.push(stage);return {...structuredClone(decision),unresolved:stage===1||!complete?['uncertain']:[]};};const deps={github:f.github,classify,now:()=>time};
+  assert.equal((await runEngine(config,deps)).deferred,1);assert.equal((await runEngine(config,deps))[complete?'processed':'humanReview'],1);assert.deepEqual(stages,[1,2]);assert.equal(lastState(f).pass,2);
+  await runEngine(config,deps);assert.deepEqual(stages,[1,2]);
+  const before=lastState(f);const retry=await runEngine({...config,eventName:'workflow_dispatch',itemNumber:1,reclassify:true},deps);
+  assert.equal(retry.deferred,1);assert.deepEqual(stages,[1,2,1]);assert.equal(lastState(f).pass,1);assert.deepEqual(lastState(f).ownership,before.ownership);assert.deepEqual(lastState(f).removedLabels,['bug']);assert.equal(f.items.get(1).priority,'Human priority');assert.equal(f.items.get(1).labels.includes('bug'),false);
+ }
+});
+test('automatic reclassify flag cannot renew unchanged exhausted review passes',async()=>{
+ const f=fixture();await enroll(f);let calls=0;const classify=async()=>{calls++;return {...structuredClone(decision),unresolved:['uncertain']};};const deps={github:f.github,classify,now:()=>time};await runEngine(config,deps);await runEngine(config,deps);const r=await runEngine({...config,reclassify:true},deps);assert.equal(r.humanReview,1);assert.equal(calls,2);assert.equal(lastState(f).pass,2);
+});

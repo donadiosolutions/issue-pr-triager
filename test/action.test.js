@@ -343,3 +343,55 @@ test('rejects malformed manual result cursor and bounds model usage totals', asy
     assert.match(summary, /\| gpt-6-luna \| 1 \| 9007199254740991 \| 1 \|/);
   } finally { await rm(context.directory, { recursive: true, force: true }); }
 });
+
+test('checkpoint mode discovers artifacts early without reading checkpoint files or constructing triage clients', async () => {
+  const context = await setup({ inputs: { MODE: 'checkpoint', 'OPENAI-API-TOKEN': '' } });
+  let seen;
+  try {
+    context.env.GITHUB_WORKFLOW_REF = 'org/repo/.github/workflows/triage.yml@main';
+    await import('node:fs/promises').then(({ writeFile }) => writeFile(context.env.GITHUB_EVENT_PATH, JSON.stringify({ repository: { id: 21, default_branch: 'main' } })));
+    context.dependencies.fs = { stat: async () => { throw new Error('checkpoint file should not be loaded'); } };
+    context.dependencies.discoverCheckpoint = async (args) => { seen = args; return { artifactId: '12', runId: '34' }; };
+    context.dependencies.GitHub = class { constructor() { throw new Error('GitHub adapter should not be constructed'); } };
+    context.dependencies.createClassifier = () => { throw new Error('classifier should not be constructed'); };
+    context.dependencies.runEngine = async () => { throw new Error('engine should not run'); };
+    assert.deepEqual(await runAction(context.env, context.dependencies), { artifactId: '12', runId: '34' });
+    assert.deepEqual(seen, {
+      token: 'gh-secret', repository: 'org/repo', workflowRef: context.env.GITHUB_WORKFLOW_REF,
+      defaultBranch: 'main', repositoryId: 21, now: context.dependencies.now
+    });
+    const outputs = await readFile(context.env.GITHUB_OUTPUT, 'utf8');
+    assert.match(outputs, /processed=0/);
+    assert.match(outputs, /checkpoint-artifact-id=12/);
+    assert.match(outputs, /checkpoint-run-id=34/);
+    assert.doesNotMatch(outputs, /checkpoint-path=/);
+  } finally { await rm(context.directory, { recursive: true, force: true }); }
+});
+
+test('checkpoint mode writes empty discovery outputs and rejects malformed adapter IDs', async () => {
+  const context = await setup({ inputs: { MODE: 'checkpoint', 'OPENAI-API-TOKEN': '' } });
+  try {
+    context.dependencies.discoverCheckpoint = async () => ({ artifactId: null, runId: null });
+    await runAction(context.env, context.dependencies);
+    assert.ok((await readFile(context.env.GITHUB_OUTPUT, 'utf8')).includes('checkpoint-artifact-id=\ncheckpoint-run-id=\n'));
+    context.dependencies.discoverCheckpoint = async () => ({ artifactId: 'bad', runId: '2' });
+    await assert.rejects(runAction(context.env, context.dependencies), /Invalid checkpoint discovery result/);
+  } finally { await rm(context.directory, { recursive: true, force: true }); }
+});
+
+test('checkpoint mode defaults to built-in discovery with injected bounded request', async () => {
+  const context = await setup({ inputs: { MODE: 'checkpoint', 'OPENAI-API-TOKEN': '' } });
+  const paths = [];
+  try {
+    context.env.GITHUB_WORKFLOW_REF = 'org/repo/.github/workflows/triage.yml@main';
+    await import('node:fs/promises').then(({ writeFile }) => writeFile(context.env.GITHUB_EVENT_PATH, JSON.stringify({ repository: { id: 21, default_branch: 'main' } })));
+    context.dependencies.discoverCheckpoint = undefined;
+    context.dependencies.now = undefined;
+    context.dependencies.checkpointDependencies = { request: async (_method, path) => {
+      paths.push(path);
+      return path.includes('/workflows/') ? { id: 41 } : { artifacts: [] };
+    } };
+    assert.deepEqual(await runAction(context.env, context.dependencies), { artifactId: null, runId: null });
+    assert.equal(paths.length, 2);
+  } finally { await rm(context.directory, { recursive: true, force: true }); }
+});
