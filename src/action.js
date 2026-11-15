@@ -5,6 +5,7 @@ import { runEngine as defaultRunEngine } from './engine.js';
 import { GitHub as DefaultGitHub } from './github.js';
 import { createClassifier as defaultCreateClassifier } from './models.js';
 import { validCheckpoint, validQueueCheckpoint } from './state.js';
+import { discoverCheckpoint as defaultDiscoverCheckpoint } from './checkpoint.js';
 
 const MAX_CHECKPOINT_BYTES = 1024 * 1024;
 const INPUTS = [
@@ -147,14 +148,32 @@ export async function runAction(env = process.env, dependencies = {}) {
   const projectNumber = positiveInteger(values['project-number'], 'project-number');
   const itemNumber = positiveInteger(values['item-number'], 'item-number', true);
   const mode = values.mode || 'process';
-  if (!['enroll', 'process', 'backfill'].includes(mode)) throw new Error('Invalid mode: expected enroll, process, or backfill.');
+  if (!['enroll', 'process', 'backfill', 'checkpoint'].includes(mode)) throw new Error('Invalid mode: expected enroll, process, backfill, or checkpoint.');
   const dryRun = booleanInput(values['dry-run'], 'dry-run');
   const reclassify = booleanInput(values.reclassify, 'reclassify');
-  if (mode !== 'enroll' && !values['openai-api-token']) throw new Error('openai-api-token is required.');
+  if (!['enroll', 'checkpoint'].includes(mode) && !values['openai-api-token']) throw new Error('openai-api-token is required.');
   const eventText = await fs.readFile(env.GITHUB_EVENT_PATH, 'utf8');
   let event;
   try { event = JSON.parse(eventText); }
   catch { throw new Error('GitHub event JSON is malformed.'); }
+  if (mode === 'checkpoint') {
+    const discover = dependencies.discoverCheckpoint ?? defaultDiscoverCheckpoint;
+    const discovered = await discover({
+      ...(dependencies.checkpointDependencies ?? {}),
+      token: values['github-token'], repository, workflowRef: env.GITHUB_WORKFLOW_REF,
+      defaultBranch: event.repository?.default_branch, repositoryId: event.repository?.id,
+      now: dependencies.now ?? Date.now
+    });
+    const artifactId = discovered?.artifactId;
+    const runId = discovered?.runId;
+    const validIds = (artifactId === null && runId === null) ||
+      (typeof artifactId === 'string' && /^[1-9]\d*$/u.test(artifactId) && typeof runId === 'string' && /^[1-9]\d*$/u.test(runId));
+    if (!validIds) throw new Error('Invalid checkpoint discovery result.');
+    if (env.GITHUB_OUTPUT) {
+      await fs.appendFile(env.GITHUB_OUTPUT, `processed=0\ndeferred=0\nfailed=0\nhuman-review=0\nbackfill-remaining=false\ncheckpoint-artifact-id=${artifactId ?? ''}\ncheckpoint-run-id=${runId ?? ''}\n`);
+    }
+    return { artifactId: artifactId ?? null, runId: runId ?? null };
+  }
   const checkpointPath = values['checkpoint-path'] || join(env.RUNNER_TEMP || process.cwd(), 'issue-pr-triager', 'checkpoint.json');
   if (/[\r\n]/.test(checkpointPath)) throw new Error('checkpoint-path cannot contain line breaks.');
   const checkpoint = await loadCheckpoint(checkpointPath, fs);

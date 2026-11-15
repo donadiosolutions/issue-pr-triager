@@ -53,8 +53,10 @@ Use separate enrollment and processing jobs:
 1. `issues: opened` and `pull_request_target: opened` call `mode: enroll`. This records durable queue state and project membership before classification. Keep enrollment outside the worker concurrency group.
 2. A worker calls `mode: process` after enrollment, on edits/reopening/PR synchronization, or every 10 minutes. Serialize workers by consumer repository; do not cancel an active worker.
 3. `workflow_dispatch` may select an existing `item-number` or explicitly start `mode: backfill`. Default its backfill input to `false`. Use `dry-run: true` to inspect decisions first.
-4. Restore the latest checkpoint produced by the same trusted caller workflow and default branch, then upload the updated checkpoint after processing. A dry run must not publish backfill authorization. Checkpoints expire after 30 days.
+4. Call `mode: checkpoint` with the caller's `${{ github.token }}` and `actions: read` permission. Its `checkpoint-artifact-id` and `checkpoint-run-id` outputs identify the latest artifact from the same trusted workflow and default branch. Pass these to pinned `actions/download-artifact`, then upload updated progress after processing. Lookup inspects at most 100 artifacts within a 60-second deadline. A dry run must not publish backfill authorization. Checkpoints expire after 30 days.
 5. Ignore follow-up events authored by the triager App. On `labeled`, run only for `triage`.
+
+Keep automatic processing disabled during setup, for example with a repository variable `TRIAGE_ENABLED=false`. Permit manual dry runs, validate the consumer credentials and provider requests, then set `TRIAGE_ENABLED=true` before a new-item write canary. Enabling creation events does not authorize backlog enrollment.
 
 The worker processes only items with state authored by the authenticated App and bound to the repository and project. An existing `triage` label alone does not enroll an old item. A schedule may continue a manually authorized backfill; a missing or expired checkpoint requires another manual execution.
 
@@ -64,10 +66,10 @@ For `pull_request_target`, execute only the pinned Action and trusted caller ste
 
 | Input | Default | Meaning |
 |---|---|---|
-| `github-token` | Required | Scoped installation token |
-| `openai-api-token` | Required for processing | OpenAI token from `secrets.TRIAGER_TOKEN` |
+| `github-token` | Required | Scoped installation token; caller token with Actions read permission for checkpoint lookup |
+| `openai-api-token` | Required for processing | OpenAI token from `secrets.TRIAGER_TOKEN`; not needed for enrollment or checkpoint lookup |
 | `project-number` | Required | Organization project number |
-| `mode` | `process` | `enroll`, `process`, or manually authorized `backfill` |
+| `mode` | `process` | `enroll`, `process`, manually authorized `backfill`, or read-only `checkpoint` |
 | `item-number` | Empty | Optional item to enroll through manual execution |
 | `dry-run` | `false` | Report intended work without GitHub changes |
 | `reclassify` | `false` | Refresh bot-owned values that still match their ownership record |
@@ -77,7 +79,7 @@ For `pull_request_target`, execute only the pinned Action and trusted caller ste
 
 Boolean inputs accept exactly `true` or `false`. Item and project numbers must be positive integers. Repository and event identity come from the runner environment.
 
-Outputs: `processed`, `deferred`, `failed`, `human-review`, `backfill-remaining`, and `checkpoint-path`. The Actions summary reports processing counts and model usage. Checkpoint files contain discovery progress, never credentials or issue bodies.
+Outputs: `processed`, `deferred`, `failed`, `human-review`, `backfill-remaining`, and `checkpoint-path`. Checkpoint lookup also exposes `checkpoint-artifact-id` and `checkpoint-run-id` when a trusted artifact exists. The Actions summary reports processing counts and model usage. Checkpoint files contain discovery progress, never credentials or issue bodies.
 
 ## Classification and review
 
